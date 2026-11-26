@@ -1,3 +1,4 @@
+const http = require("http");
 const {
   Client,
   GatewayIntentBits,
@@ -8,13 +9,19 @@ const {
 } = require("discord.js");
 
 const { TOKEN, CLIENT_ID, GUILD_ID } = process.env;
+
 console.log("TOKEN length:", TOKEN ? TOKEN.length : "MISSING");
 console.log("CLIENT_ID:", CLIENT_ID ? "set" : "MISSING");
 console.log("GUILD_ID:", GUILD_ID ? "set" : "MISSING");
 
+// Tiny web server so Fly's proxy gets an answer
+const PORT = process.env.PORT || 8080;
+http
+  .createServer((req, res) => res.end("ok"))
+  .listen(PORT, "0.0.0.0", () => console.log(`Web server listening on ${PORT}`));
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Define your slash commands here
 const commands = [
   new SlashCommandBuilder()
     .setName("ping")
@@ -32,7 +39,6 @@ const commands = [
     ),
 ];
 
-// Register the commands when the bot starts
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -46,28 +52,39 @@ client.once("ready", async () => {
   }
 });
 
-// Handle the commands
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "ping") {
-    return interaction.reply(`Pong! ${client.ws.ping}ms`);
-  }
+  try {
+    if (interaction.commandName === "ping") {
+      return interaction.reply(`Pong! ${client.ws.ping}ms`);
+    }
 
-  if (interaction.commandName === "about") {
-    const embed = new EmbedBuilder()
-      .setTitle("Project Select")
-      .setDescription(
-        "A universal script hub for Arsenal, Phantom Forces, MM2, Rivals and Universal, with an AI config assistant. Join the Discord to be selected as a beta tester."
-      )
-      .setColor(0xff3b4e);
-    return interaction.reply({ embeds: [embed] });
-  }
+    if (interaction.commandName === "about") {
+      const embed = new EmbedBuilder()
+        .setTitle("Project Select")
+        .setDescription(
+          "A universal script hub for Arsenal, Phantom Forces, MM2, Rivals and Universal, with an AI config assistant. Join the Discord to be selected as a beta tester."
+        )
+        .setColor(0xff3b4e);
+      return interaction.reply({ embeds: [embed] });
+    }
 
-  if (interaction.commandName === "say") {
-    const text = interaction.options.getString("text");
-    return interaction.reply({ content: text, allowedMentions: { parse: [] } });
+    if (interaction.commandName === "say") {
+      const text = interaction.options.getString("text");
+      return interaction.reply({
+        content: text,
+        allowedMentions: { parse: [] },
+      });
+    }
+  } catch (err) {
+    console.error("Command error:", err);
   }
 });
 
-client.login(TOKEN);
+client.on("error", (err) => console.error("Client error:", err));
+process.on("unhandledRejection", (err) =>
+  console.error("Unhandled rejection:", err)
+);
+
+client.login(TOKEN).catch((err) => console.error("Login failed:", err));
