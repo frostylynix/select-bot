@@ -3,6 +3,7 @@ const fs = require("fs");
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -21,12 +22,20 @@ http
   .createServer((req, res) => res.end("ok"))
   .listen(PORT, "0.0.0.0", () => console.log(`Web server listening on ${PORT}`));
 
-// ---------- Announcement channel ----------
+// ---------- Saved settings ----------
 const CHANNEL_FILE = "./channel.json";
+const BETA_FILE = "./beta.json";
+
 let announceChannelId = process.env.ANNOUNCE_CHANNEL_ID || null;
 try {
   announceChannelId =
     JSON.parse(fs.readFileSync(CHANNEL_FILE, "utf8")).id || announceChannelId;
+} catch {}
+
+let reviewerId = process.env.OWNER_ID || null;
+try {
+  reviewerId =
+    JSON.parse(fs.readFileSync(BETA_FILE, "utf8")).reviewerId || reviewerId;
 } catch {}
 
 // ---------- Executor status (WEAO) ----------
@@ -112,7 +121,10 @@ function buildRow(active, disabled = false) {
 }
 
 // ---------- Bot ----------
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
+  partials: [Partials.Channel],
+});
 
 // ---------- Status change announcements ----------
 const POLL_MS = 3 * 60 * 1000;
@@ -176,6 +188,121 @@ async function checkChanges() {
   }
 }
 
+// ---------- Beta applications ----------
+const QUESTIONS = [
+  "What's your Discord username?",
+  "What's your Roblox username?",
+  "Which executor do you use?",
+  "Which game will you use Project Select in most (Arsenal, Phantom Forces, MM2, Rivals or Universal)?",
+  "Why should you be picked as a beta tester?",
+];
+
+const activeApps = new Set(); // people currently answering questions
+const applicants = new Set(); // people whose DMs get forwarded to the reviewer
+
+async function runApplication(user, dm) {
+  activeApps.add(user.id);
+  const answers = [];
+  try {
+    for (let i = 0; i < QUESTIONS.length; i++) {
+      await dm.send(`**Question ${i + 1}/${QUESTIONS.length}**\n${QUESTIONS[i]}`);
+      const got = await dm.awaitMessages({
+        filter: (m) => m.author.id === user.id,
+        max: 1,
+        time: 5 * 60 * 1000,
+        errors: ["time"],
+      });
+      const reply = got.first();
+      if (reply.content.trim().toLowerCase() === "cancel") {
+        await dm.send("Application cancelled.");
+        return;
+      }
+      answers.push(reply.content || "(no text)");
+    }
+  } catch {
+    await dm
+      .send("Timed out. Click the button again to restart your application.")
+      .catch(() => {});
+    return;
+  } finally {
+    activeApps.delete(user.id);
+  }
+
+  applicants.add(user.id);
+
+  try {
+    if (!reviewerId) {
+      await dm.send("Applications aren't fully set up yet. Please try again later.");
+      return;
+    }
+    const embed = new EmbedBuilder()
+      .setTitle("New beta application")
+      .setDescription(`From <@${user.id}> (${user.tag})\nUser ID: ${user.id}`)
+      .addFields(
+        QUESTIONS.map((q, i) => ({
+          name: q.slice(0, 250),
+          value: (answers[i] || "-").slice(0, 1000),
+        }))
+      )
+      .setColor(0xff3b4e)
+      .setTimestamp();
+    const reviewer = await client.users.fetch(reviewerId);
+    await reviewer.send({ embeds: [embed] });
+    await dm.send(
+      "Thanks! Your application has been sent. If you're selected, you'll hear from us here."
+    );
+  } catch (err) {
+    console.error("Failed to send application:", err.message);
+    await dm
+      .send("Something went wrong sending your application. Please try again later.")
+      .catch(() => {});
+  }
+}
+
+async function handleApplyButton(interaction) {
+  const user = interaction.user;
+  if (activeApps.has(user.id)) {
+    return interaction.reply({
+      content: "You already have an application in progress. Check your DMs.",
+      flags: 64,
+    });
+  }
+  await interaction.deferReply({ flags: 64 });
+  let dm;
+  try {
+    dm = await user.createDM();
+    await dm.send(
+      "Hi! Thanks for applying to the Project Select beta. I'll ask a few questions, one at a time. Type `cancel` at any time to stop.\n\nYour answers, and any messages you send me here, are shared with the Project Select team."
+    );
+  } catch {
+    return interaction.editReply(
+      "I couldn't DM you. Turn on DMs from server members in the server's privacy settings, then click the button again."
+    );
+  }
+  await interaction.editReply("Check your DMs.");
+  runApplication(user, dm);
+}
+
+// Forward DMs from applicants to the reviewer
+client.on("messageCreate", async (m) => {
+  try {
+    if (m.author.bot || m.guildId) return;
+    if (activeApps.has(m.author.id)) return;
+    if (!applicants.has(m.author.id) || !reviewerId) return;
+    const files = [...m.attachments.values()].map((a) => a.url).join("\n");
+    const embed = new EmbedBuilder()
+      .setTitle(`Message from ${m.author.tag}`)
+      .setDescription(((m.content || "") + (files ? `\n${files}` : "")).slice(0, 4000) || "(empty)")
+      .setFooter({ text: `User ID: ${m.author.id} - reply with /betaset` })
+      .setColor(0x8a8a99)
+      .setTimestamp();
+    const reviewer = await client.users.fetch(reviewerId);
+    await reviewer.send({ embeds: [embed] });
+  } catch (err) {
+    console.error("Failed to forward DM:", err.message);
+  }
+});
+
 // ---------- Commands ----------
 const commands = [
   new SlashCommandBuilder()
@@ -206,6 +333,36 @@ const commands = [
     .setName("testannounce")
     .setDescription("Send a sample announcement to the announcement channel")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName("betasetup")
+    .setDescription("Post the beta application button in this channel")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName("betaset")
+    .setDescription("Message a beta applicant through the bot")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addUserOption((o) =>
+      o.setName("user").setDescription("The applicant").setRequired(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("message")
+        .setDescription("What the bot will send them")
+        .setRequired(true)
+        .setMaxLength(2000)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("status")
+        .setDescription("Label for this update")
+        .addChoices(
+          { name: "Accepted", value: "Accepted" },
+          { name: "Declined", value: "Declined" },
+          { name: "Update", value: "Update" }
+        )
+    ),
 ];
 
 client.once("ready", async () => {
@@ -226,9 +383,16 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
   try {
+    if (interaction.isButton()) {
+      if (interaction.customId === "beta_apply") {
+        return handleApplyButton(interaction);
+      }
+      return; // autoexec buttons are handled by their own collector
+    }
+
+    if (!interaction.isChatInputCommand()) return;
+
     if (interaction.commandName === "ping") {
       return interaction.reply(`Pong! ${client.ws.ping}ms`);
     }
@@ -280,6 +444,69 @@ client.on("interactionCreate", async (interaction) => {
           : "Couldn't send. Use /setchannel first, and make sure the bot can view and send messages and embeds in that channel.",
         flags: 64,
       });
+    }
+
+    if (interaction.commandName === "betasetup") {
+      reviewerId = interaction.user.id;
+      try {
+        fs.writeFileSync(BETA_FILE, JSON.stringify({ reviewerId }));
+      } catch (err) {
+        console.error("Couldn't save beta file:", err.message);
+      }
+      const panel = new EmbedBuilder()
+        .setTitle("Project Select Beta")
+        .setDescription(
+          "Want to be selected as a beta tester? Click the button below and I'll DM you a few questions."
+        )
+        .setColor(0xff3b4e);
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("beta_apply")
+          .setLabel("DM Applications!")
+          .setStyle(ButtonStyle.Primary)
+      );
+      try {
+        await interaction.channel.send({ embeds: [panel], components: [row] });
+      } catch (err) {
+        console.error("Couldn't post panel:", err.message);
+        return interaction.reply({
+          content:
+            "Couldn't post in this channel. Give the bot View Channel, Send Messages and Embed Links here.",
+          flags: 64,
+        });
+      }
+      return interaction.reply({
+        content:
+          `Application panel posted. Applications will be sent to you in DMs.\n\n` +
+          `To keep this after restarts or redeploys, add a Fly secret named OWNER_ID with the value ${reviewerId}`,
+        flags: 64,
+      });
+    }
+
+    if (interaction.commandName === "betaset") {
+      const target = interaction.options.getUser("user");
+      const message = interaction.options.getString("message");
+      const status = interaction.options.getString("status") || "Update";
+      const colors = { Accepted: 0x3ddc84, Declined: 0xff3b4e, Update: 0x8a8a99 };
+      const embed = new EmbedBuilder()
+        .setTitle(`Beta application: ${status}`)
+        .setDescription(message.slice(0, 4000))
+        .setColor(colors[status] || 0x8a8a99)
+        .setFooter({ text: "Project Select beta team - reply here to talk to us" })
+        .setTimestamp();
+      try {
+        await target.send({ embeds: [embed] });
+        applicants.add(target.id);
+        return interaction.reply({
+          content: `Sent to ${target.tag}. If they reply to the bot, you'll get it in your DMs.`,
+          flags: 64,
+        });
+      } catch {
+        return interaction.reply({
+          content: `Couldn't DM ${target.tag}. They may have DMs closed.`,
+          flags: 64,
+        });
+      }
     }
 
     if (interaction.commandName === "autoexec") {
