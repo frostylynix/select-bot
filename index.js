@@ -8,6 +8,9 @@ const {
 } = require("discord.js");
 
 const { TOKEN, CLIENT_ID, GUILD_ID } = process.env;
+console.log("TOKEN length:", TOKEN ? TOKEN.length : "MISSING");
+console.log("CLIENT_ID:", CLIENT_ID ? "set" : "MISSING");
+console.log("GUILD_ID:", GUILD_ID ? "set" : "MISSING");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
